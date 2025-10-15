@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Talking Character – CNC Lathe (stable front)</title>
+  <title>Talking Character – CNC Lathe (front-facing)</title>
   <script src="https://cdn.babylonjs.com/babylon.js"></script>
   <script src="https://cdn.babylonjs.com/loaders/babylon.glTF2FileLoader.js"></script>
   <style>
@@ -26,7 +26,6 @@
   <button id="muteButton" class="btn">🔈 Mute</button>
   <div id="hint">drag = orbit · wheel = zoom</div>
   <canvas id="renderCanvas"></canvas>
-  <!-- Keep filenames exactly as in your repo -->
   <audio id="voice" src="CNC Lathe audio.mp3" preload="auto"></audio>
 
   <script>
@@ -36,82 +35,83 @@
     });
 
     let scene, idleGroup=null, talkGroups=[];
-    // If you still see the character's back, set this to true (it rotates Y by 180°)
-    const FORCE_FACE_FORWARD = true;
 
-    // ---------- helpers ----------
+    // If you STILL see the back for some reason, set this to true to flip once.
+    const FLIP_Y_180 = false;
+
     function stopAllAnimationGroups(sc){
       (sc.animationGroups||[]).forEach(g=>{ try{ g.stop(); }catch(e){} });
       sc.stopAllAnimations();
     }
 
-    function centerAndFit(mesh, camera){
-      const bb = mesh.getHierarchyBoundingVectors(true);
-      // center to origin (AFTER orientation changes)
-      const center = bb.min.add(bb.max).scale(0.5);
-      mesh.position = mesh.position.subtract(center);
-
-      const size = bb.max.subtract(bb.min);
-      const maxDim = Math.max(size.x, size.y, size.z);
-      // scale to a consistent visual size
-      if (maxDim > 0){
-        const target = 2.0;
-        const s = target / maxDim;
-        mesh.scaling = new BABYLON.Vector3(s, s, s);
-      }
-
-      // Recompute bounds after scaling, set camera target + radius
-      const bb2 = mesh.getHierarchyBoundingVectors(true);
-      const center2 = bb2.min.add(bb2.max).scale(0.5);
-      const size2 = bb2.max.subtract(bb2.min);
-      const maxDim2 = Math.max(size2.x, size2.y, size2.z);
-
-      camera.setTarget(center2);
-      // Fit radius: a bit larger than the bounding sphere radius
-      camera.radius = Math.max(2.2, maxDim2 * 1.2);
-    }
-
     function orientToYUpAndFront(mesh){
-      // convert Z-up to Y-up if needed (heuristic on dimensions)
+      // Convert Z-up exports to Babylon Y-up if needed
       const bb = mesh.getHierarchyBoundingVectors(true);
       const sz = bb.max.subtract(bb.min);
       if (sz.z > sz.y * 1.5) {
         mesh.rotate(BABYLON.Axis.X, Math.PI/2, BABYLON.Space.LOCAL);
       }
-      // If feet end up below world origin, that's fine; if the whole thing is upside down, flip Z
+      // Ensure not upside down
       const bb2 = mesh.getHierarchyBoundingVectors(true);
       if (bb2.max.y < 0) {
         mesh.rotate(BABYLON.Axis.Z, Math.PI, BABYLON.Space.LOCAL);
       }
-      // Face camera: most avatar exports face -Z; rotate to face +Z (toward camera)
-      if (FORCE_FACE_FORWARD){
-        // Try both options and choose the one that points arms/hands forward relative to the camera.
-        // Simple rule: rotate 180° on Y to show front for -Z-facing models.
-        mesh.rotation.y = Math.PI;
-      } else {
-        mesh.rotation.y = 0;
-      }
+
+      // Face +Z (front toward camera we’ll place on -Z)
+      mesh.rotation.y = 0;
+
+      if (FLIP_Y_180) mesh.rotate(BABYLON.Axis.Y, Math.PI, BABYLON.Space.LOCAL);
     }
 
-    // ---------- scene ----------
+    function centerScaleAndFrame(mesh, camera){
+      // Center at origin and scale to consistent visual size
+      const b1 = mesh.getHierarchyBoundingVectors(true);
+      const center = b1.min.add(b1.max).scale(0.5);
+      mesh.position = mesh.position.subtract(center);
+
+      const size = b1.max.subtract(b1.min);
+      const maxDim = Math.max(size.x, size.y, size.z);
+      if (maxDim > 0){
+        const target = 2.0; // desired overall box size
+        const s = target / maxDim;
+        mesh.scaling = new BABYLON.Vector3(s, s, s);
+      }
+
+      // Recompute after scaling for precise framing
+      const b2 = mesh.getHierarchyBoundingVectors(true);
+      const c2 = b2.min.add(b2.max).scale(0.5);
+      const size2 = b2.max.subtract(b2.min);
+      const maxDim2 = Math.max(size2.x, size2.y, size2.z);
+
+      camera.setTarget(c2);
+
+      // Place camera in FRONT (on the -Z side)
+      camera.alpha = Math.PI;      // around Y so we’re on -Z
+      camera.beta  = Math.PI/2.35; // slight angle above horizon
+
+      // Back the camera up a bit more than before
+      camera.radius = Math.max(2.6, maxDim2 * 1.8);
+    }
+
     async function createScene(){
       scene = new BABYLON.Scene(engine);
       scene.clearColor = new BABYLON.Color4(0,0,0,1);
 
+      // ArcRotate camera; we’ll set alpha/beta/radius AFTER we know bounds
       const camera = new BABYLON.ArcRotateCamera(
         "camera",
-        Math.PI/2,          // alpha: side angle
-        Math.PI/2.4,        // beta: slightly above horizon (front-ish)
-        3.0,                // radius (will be refit)
+        Math.PI,            // front (-Z)
+        Math.PI/2.35,       // slight tilt
+        4.0,
         new BABYLON.Vector3(0,1,0),
         scene
       );
       camera.attachControl(canvas, true);
       camera.lowerRadiusLimit = 1.2;
-      camera.upperRadiusLimit = 20.0;
-      // Keep the camera from going fully top/bottom:
-      camera.lowerBetaLimit = 0.8;   // ~45° above horizon
-      camera.upperBetaLimit = 2.3;   // ~132°
+      camera.upperRadiusLimit = 30.0;
+      // Protect from extreme top/bottom views
+      camera.lowerBetaLimit = 0.7;
+      camera.upperBetaLimit = 2.4;
 
       const light = new BABYLON.HemisphericLight("hemi", new BABYLON.Vector3(0,1,0), scene);
       light.intensity = 1.25;
@@ -120,14 +120,12 @@
       const root = result.meshes[0];
       result.meshes.forEach(m => { if (m.rotationQuaternion) m.rotationQuaternion = null; });
 
-      // 1) Fix orientation
+      // Orientation first, then stop any auto-play, then center/fit
       orientToYUpAndFront(root);
-      // 2) Stop any autoplay animations BEFORE we decide what to run
       stopAllAnimationGroups(scene);
-      // 3) Center + fit camera EXACTLY to the model
-      centerAndFit(root, camera);
+      centerScaleAndFrame(root, camera);
 
-      // 4) detect idle/talk groups
+      // Detect animations
       const groups = scene.animationGroups || [];
       const has = (g, arr) => arr.some(w => g.name.toLowerCase().includes(w));
       idleGroup  = groups.find(g => has(g, ["idle","stand","breath","breathe","rest"]));
@@ -143,7 +141,7 @@
     createScene().then(() => engine.runRenderLoop(() => scene && scene.render()));
     window.addEventListener("resize", () => engine.resize());
 
-    // ---------- audio / animation control ----------
+    // -------- audio / animation control --------
     const audio = document.getElementById("voice");
     const playBtn = document.getElementById("audioButton");
     const muteBtn = document.getElementById("muteButton");
