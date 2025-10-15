@@ -3,19 +3,19 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Talking Character – CNC Lathe (fixed)</title>
+  <title>Talking Character – CNC Lathe (stable front)</title>
   <script src="https://cdn.babylonjs.com/babylon.js"></script>
   <script src="https://cdn.babylonjs.com/loaders/babylon.glTF2FileLoader.js"></script>
   <style>
     html, body { margin:0; padding:0; height:100%; background:#000; overflow:hidden; }
     canvas { width:100%; height:100%; display:block; }
     .btn {
-      position: absolute; top: 16px; left: 16px; z-index: 10;
-      padding: 10px 16px; border: none; border-radius: 10px;
-      background: #fff; color:#111; font-weight:600; cursor:pointer;
-      box-shadow: 0 6px 18px rgba(0,0,0,.25); margin-right: 8px;
+      position:absolute; top:16px; left:16px; z-index:10;
+      padding:10px 16px; border:none; border-radius:10px; margin-right:8px;
+      background:#fff; color:#111; font-weight:600; cursor:pointer;
+      box-shadow:0 6px 18px rgba(0,0,0,.25);
     }
-    #muteButton { left: 140px; }
+    #muteButton { left:140px; }
     #hint { position:absolute; bottom:16px; left:16px; color:#bbb; font-family:system-ui, sans-serif; font-size:12px }
     #loading { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:#fff; font-family:system-ui; background:rgba(0,0,0,.6) }
   </style>
@@ -26,124 +26,141 @@
   <button id="muteButton" class="btn">🔈 Mute</button>
   <div id="hint">drag = orbit · wheel = zoom</div>
   <canvas id="renderCanvas"></canvas>
-  <!-- keep these filenames the same as in your repo -->
+  <!-- Keep filenames exactly as in your repo -->
   <audio id="voice" src="CNC Lathe audio.mp3" preload="auto"></audio>
 
   <script>
     const canvas = document.getElementById("renderCanvas");
     const engine = new BABYLON.Engine(canvas, true, {
-      preserveDrawingBuffer: true, stencil: true, doNotHandleContextLost: true
+      preserveDrawingBuffer:true, stencil:true, doNotHandleContextLost:true
     });
 
-    let scene, talkGroups = [], idleGroup = null;
-    const FACE_FLIP_180 = false; // set to true if you still see the back
+    let scene, idleGroup=null, talkGroups=[];
+    // If you still see the character's back, set this to true (it rotates Y by 180°)
+    const FORCE_FACE_FORWARD = true;
 
-    function centerAndFit(mesh) {
-      const {min, max} = mesh.getHierarchyBoundingVectors(true);
-      const center = min.add(max).scale(0.5);
-      mesh.position = mesh.position.subtract(center); // center to origin
-      const size = max.subtract(min);
+    // ---------- helpers ----------
+    function stopAllAnimationGroups(sc){
+      (sc.animationGroups||[]).forEach(g=>{ try{ g.stop(); }catch(e){} });
+      sc.stopAllAnimations();
+    }
+
+    function centerAndFit(mesh, camera){
+      const bb = mesh.getHierarchyBoundingVectors(true);
+      // center to origin (AFTER orientation changes)
+      const center = bb.min.add(bb.max).scale(0.5);
+      mesh.position = mesh.position.subtract(center);
+
+      const size = bb.max.subtract(bb.min);
       const maxDim = Math.max(size.x, size.y, size.z);
-      if (maxDim > 0) {
-        const target = 2.0; // desired bounding-box max dimension
+      // scale to a consistent visual size
+      if (maxDim > 0){
+        const target = 2.0;
         const s = target / maxDim;
         mesh.scaling = new BABYLON.Vector3(s, s, s);
       }
-      return { center, size };
+
+      // Recompute bounds after scaling, set camera target + radius
+      const bb2 = mesh.getHierarchyBoundingVectors(true);
+      const center2 = bb2.min.add(bb2.max).scale(0.5);
+      const size2 = bb2.max.subtract(bb2.min);
+      const maxDim2 = Math.max(size2.x, size2.y, size2.z);
+
+      camera.setTarget(center2);
+      // Fit radius: a bit larger than the bounding sphere radius
+      camera.radius = Math.max(2.2, maxDim2 * 1.2);
     }
 
-    function orientUpAxisIfNeeded(mesh) {
-      // If model was exported Z-up, rotate to Y-up
-      const {min, max} = mesh.getHierarchyBoundingVectors(true);
-      const size = max.subtract(min);
-      if (size.z > size.y * 1.5) {
+    function orientToYUpAndFront(mesh){
+      // convert Z-up to Y-up if needed (heuristic on dimensions)
+      const bb = mesh.getHierarchyBoundingVectors(true);
+      const sz = bb.max.subtract(bb.min);
+      if (sz.z > sz.y * 1.5) {
         mesh.rotate(BABYLON.Axis.X, Math.PI/2, BABYLON.Space.LOCAL);
       }
-      // If inverted (feet above), flip 180° around Z
+      // If feet end up below world origin, that's fine; if the whole thing is upside down, flip Z
       const bb2 = mesh.getHierarchyBoundingVectors(true);
       if (bb2.max.y < 0) {
         mesh.rotate(BABYLON.Axis.Z, Math.PI, BABYLON.Space.LOCAL);
       }
-
-      // IMPORTANT: face **toward** camera (front view)
-      // Previous build set Math.PI and you saw the back. Use 0 here.
-      mesh.rotation.y = 0;
-
-      // Optional escape hatch: quick flip if you still see the back.
-      if (FACE_FLIP_180) mesh.rotate(BABYLON.Axis.Y, Math.PI, BABYLON.Space.LOCAL);
+      // Face camera: most avatar exports face -Z; rotate to face +Z (toward camera)
+      if (FORCE_FACE_FORWARD){
+        // Try both options and choose the one that points arms/hands forward relative to the camera.
+        // Simple rule: rotate 180° on Y to show front for -Z-facing models.
+        mesh.rotation.y = Math.PI;
+      } else {
+        mesh.rotation.y = 0;
+      }
     }
 
-    async function createScene() {
+    // ---------- scene ----------
+    async function createScene(){
       scene = new BABYLON.Scene(engine);
       scene.clearColor = new BABYLON.Color4(0,0,0,1);
 
-      const camera = new BABYLON.ArcRotateCamera("camera", Math.PI/2, Math.PI/2.2, 3.0, new BABYLON.Vector3(0, 1, 0), scene);
-      camera.lowerRadiusLimit = 1.2;
-      camera.upperRadiusLimit = 10.0;
-      camera.wheelPrecision = 80;
+      const camera = new BABYLON.ArcRotateCamera(
+        "camera",
+        Math.PI/2,          // alpha: side angle
+        Math.PI/2.4,        // beta: slightly above horizon (front-ish)
+        3.0,                // radius (will be refit)
+        new BABYLON.Vector3(0,1,0),
+        scene
+      );
       camera.attachControl(canvas, true);
+      camera.lowerRadiusLimit = 1.2;
+      camera.upperRadiusLimit = 20.0;
+      // Keep the camera from going fully top/bottom:
+      camera.lowerBetaLimit = 0.8;   // ~45° above horizon
+      camera.upperBetaLimit = 2.3;   // ~132°
 
-      const light = new BABYLON.HemisphericLight("hemi", new BABYLON.Vector3(0, 1, 0), scene);
-      light.intensity = 1.3;
+      const light = new BABYLON.HemisphericLight("hemi", new BABYLON.Vector3(0,1,0), scene);
+      light.intensity = 1.25;
 
-      // Load GLB
       const result = await BABYLON.SceneLoader.ImportMeshAsync("", "./", "CNC LATHE machine.glb", scene);
       const root = result.meshes[0];
       result.meshes.forEach(m => { if (m.rotationQuaternion) m.rotationQuaternion = null; });
 
-      // Orientation + framing
-      orientUpAxisIfNeeded(root);
-      const { center } = centerAndFit(root);
-      camera.setTarget(center);
-      camera.radius = 2.4;
+      // 1) Fix orientation
+      orientToYUpAndFront(root);
+      // 2) Stop any autoplay animations BEFORE we decide what to run
+      stopAllAnimationGroups(scene);
+      // 3) Center + fit camera EXACTLY to the model
+      centerAndFit(root, camera);
 
-      // ***** STOP EVERYTHING FIRST so lips/other anims are NOT auto-playing *****
-      (scene.animationGroups || []).forEach(g => g.stop());
-      scene.stopAllAnimations();
-
-      // Animation detection
+      // 4) detect idle/talk groups
       const groups = scene.animationGroups || [];
       const has = (g, arr) => arr.some(w => g.name.toLowerCase().includes(w));
-
-      idleGroup = groups.find(g => has(g, ["idle","stand","breath","breathe","rest"]));
+      idleGroup  = groups.find(g => has(g, ["idle","stand","breath","breathe","rest"]));
       talkGroups = groups.filter(g => has(g, ["wolf3d","viseme","lip","phoneme","talk","speak","mouth"]));
+      if (talkGroups.length === 0) talkGroups = groups.filter(g => g !== idleGroup);
 
-      // Fallback: if no explicit talk groups, try everything except idle
-      if (talkGroups.length === 0) {
-        talkGroups = groups.filter(g => g !== idleGroup);
-      }
-
-      // Start only Idle in a loop (if present)
       if (idleGroup) idleGroup.start(true, 1.0, idleGroup.from, idleGroup.to, true);
 
       document.getElementById("loading").style.display = "none";
       return scene;
     }
 
-    createScene().then(() => {
-      engine.runRenderLoop(() => scene && scene.render());
-    });
+    createScene().then(() => engine.runRenderLoop(() => scene && scene.render()));
     window.addEventListener("resize", () => engine.resize());
 
-    // -------- Audio + animation control --------
+    // ---------- audio / animation control ----------
     const audio = document.getElementById("voice");
-    const btn = document.getElementById("audioButton");
+    const playBtn = document.getElementById("audioButton");
     const muteBtn = document.getElementById("muteButton");
 
-    function startTalking() {
-      // Pause idle while talking
+    function startTalking(){
       if (idleGroup) idleGroup.stop();
       talkGroups.forEach(g => {
         try { g.stop(); } catch(e) {}
         g.start(false, 1.0, g.from, g.to, false);
       });
     }
-    function stopTalking() {
+    function stopTalking(){
       talkGroups.forEach(g => g.stop());
       if (idleGroup) idleGroup.start(true, 1.0, idleGroup.from, idleGroup.to, true);
     }
 
-    btn.addEventListener("click", async () => {
+    playBtn.addEventListener("click", async () => {
       try { audio.currentTime = 0; await audio.play(); } catch(e) { console.warn(e); }
       startTalking();
     });
