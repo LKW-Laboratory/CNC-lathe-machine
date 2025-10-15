@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Talking Character – CNC Lathe (front-orientation auto)</title>
+  <title>Talking Character – CNC Lathe (front, slight up-tilt)</title>
   <script src="https://cdn.babylonjs.com/babylon.js"></script>
   <script src="https://cdn.babylonjs.com/loaders/babylon.glTF2FileLoader.js"></script>
   <style>
@@ -26,7 +26,6 @@
   <button id="muteButton" class="btn">🔈 Mute</button>
   <div id="hint">drag = orbit · wheel = zoom</div>
   <canvas id="renderCanvas"></canvas>
-  <!-- keep filenames exactly as in your repo -->
   <audio id="voice" src="CNC Lathe audio.mp3" preload="auto"></audio>
 
   <script>
@@ -36,81 +35,73 @@
     });
 
     let scene, root, idleGroup=null, talkGroups=[];
-    const CAMERA_BACKOFF = 1.8; // push camera further back (try 2.0 if you want even wider)
+    const CAMERA_BACKOFF = 1.95;           // push camera further back (↑ to 2.2 if you want even wider)
+    const BETA_UP_TILT   = 0.10;           // radians above eye level; 0.10 ≈ 5.7° looking slightly up
 
-    // ---------- helpers ----------
     function stopAllAnimations(sc){
       (sc.animationGroups || []).forEach(g => { try{ g.stop(); }catch(e){} });
       sc.stopAllAnimations();
     }
 
-    // Normalize up-axis (Z-up → Y-up) if needed
     function normalizeUpAxis(mesh){
       const bb = mesh.getHierarchyBoundingVectors(true);
       const sz = bb.max.subtract(bb.min);
-      if (sz.z > sz.y * 1.5) {
-        mesh.rotate(BABYLON.Axis.X, Math.PI/2, BABYLON.Space.LOCAL);
-      }
-      // If inverted, flip around Z
+      if (sz.z > sz.y * 1.5) mesh.rotate(BABYLON.Axis.X, Math.PI/2, BABYLON.Space.LOCAL);
       const bb2 = mesh.getHierarchyBoundingVectors(true);
-      if (bb2.max.y < 0) {
-        mesh.rotate(BABYLON.Axis.Z, Math.PI, BABYLON.Space.LOCAL);
-      }
+      if (bb2.max.y < 0) mesh.rotate(BABYLON.Axis.Z, Math.PI, BABYLON.Space.LOCAL);
     }
 
-    // Choose the rotation (0/90/180/270) that makes the model look *widest* (X) vs *deepest* (Z)
     function chooseFrontFacingRotation(mesh){
       const candidates = [0, Math.PI/2, Math.PI, 3*Math.PI/2];
       let bestAngle = 0, bestScore = -Infinity;
-
-      const originalY = mesh.rotation.y || 0;
-
       for (const angle of candidates){
         mesh.rotation.y = angle;
         const bb = mesh.getHierarchyBoundingVectors(true);
         const width = bb.max.x - bb.min.x;
         const depth = bb.max.z - bb.min.z;
-        const score = width - depth; // bigger width relative to depth = more front-facing
-        if (score > bestScore){
-          bestScore = score;
-          bestAngle = angle;
-        }
+        const score = width - depth;
+        if (score > bestScore){ bestScore = score; bestAngle = angle; }
       }
       mesh.rotation.y = bestAngle;
     }
 
-    // Center to origin and scale to a consistent size (run AFTER orientation is final)
     function centerAndScale(mesh){
       const bb = mesh.getHierarchyBoundingVectors(true);
       const center = bb.min.add(bb.max).scale(0.5);
       mesh.position = mesh.position.subtract(center);
-
       const size = bb.max.subtract(bb.min);
       const maxDim = Math.max(size.x, size.y, size.z);
       if (maxDim > 0){
-        const target = 2.0;  // desired visual box size
-        const s = target / maxDim;
+        const s = 2.0 / maxDim;
         mesh.scaling = new BABYLON.Vector3(s, s, s);
       }
     }
 
-    // Place the camera directly in front of the model's forward direction
+    // Place camera in front and enforce a slight upward tilt (beta > π/2)
     function placeCameraInFront(camera, mesh){
       const bb = mesh.getHierarchyBoundingVectors(true);
       const center = bb.min.add(bb.max).scale(0.5);
       const size = bb.max.subtract(bb.min);
       const maxDim = Math.max(size.x, size.y, size.z);
 
-      // Model forward (local +Z)
-      const forward = mesh.getDirection(new BABYLON.Vector3(0,0,1));
+      const forward = mesh.getDirection(new BABYLON.Vector3(0,0,1));   // model's front (+Z)
       const distance = Math.max(2.2, maxDim * CAMERA_BACKOFF);
-      const camPos = center.subtract(forward.scale(distance)).add(new BABYLON.Vector3(0, maxDim * 0.1, 0)); // slight headroom
+      const camPos = center.subtract(forward.scale(distance));         // directly in front
+
+      // Put camera roughly at chest/eye level (no top-down bias)
+      camPos.y = center.y + maxDim * 0.02;
+
       camera.setTarget(center);
       camera.setPosition(camPos);
 
-      // Reasonable orbit limits
-      camera.lowerBetaLimit = 0.8;  // ~45° above horizon
-      camera.upperBetaLimit = 2.3;  // ~132°
+      // Now force angles: alpha from forward; beta slightly above π/2 (look up a bit at the avatar)
+      const alpha = Math.atan2(-forward.x, -forward.z);
+      camera.alpha = alpha;
+      camera.beta  = Math.PI / 2 + BETA_UP_TILT;
+
+      // Orbit limits
+      camera.lowerBetaLimit = Math.PI/2 - 0.15;  // don't allow big top-down
+      camera.upperBetaLimit = Math.PI/2 + 0.55;  // allow some look-up
       camera.lowerRadiusLimit = maxDim * 0.8;
       camera.upperRadiusLimit = maxDim * 5;
     }
@@ -119,7 +110,7 @@
       scene = new BABYLON.Scene(engine);
       scene.clearColor = new BABYLON.Color4(0,0,0,1);
 
-      const camera = new BABYLON.ArcRotateCamera("camera", 0, 1.2, 3.0, BABYLON.Vector3.Zero(), scene);
+      const camera = new BABYLON.ArcRotateCamera("camera", 0, Math.PI/2, 3.0, BABYLON.Vector3.Zero(), scene);
       camera.attachControl(canvas, true);
 
       const light = new BABYLON.HemisphericLight("hemi", new BABYLON.Vector3(0,1,0), scene);
@@ -129,14 +120,13 @@
       root = result.meshes[0];
       result.meshes.forEach(m => { if (m.rotationQuaternion) m.rotationQuaternion = null; });
 
-      // 1) Normalize up-axis, 2) stop any autoplay, 3) choose best front rotation, 4) center+scale, 5) place camera in front
       normalizeUpAxis(root);
       stopAllAnimations(scene);
       chooseFrontFacingRotation(root);
       centerAndScale(root);
       placeCameraInFront(camera, root);
 
-      // Detect animations
+      // Animation groups
       const groups = scene.animationGroups || [];
       const has = (g, arr) => arr.some(w => g.name.toLowerCase().includes(w));
       idleGroup  = groups.find(g => has(g, ["idle","stand","breath","breathe","rest"]));
@@ -152,7 +142,7 @@
     createScene().then(() => engine.runRenderLoop(() => scene && scene.render()));
     window.addEventListener("resize", () => engine.resize());
 
-    // ---- Audio / animation control ----
+    // --- audio / animation control ---
     const audio = document.getElementById("voice");
     const playBtn = document.getElementById("audioButton");
     const muteBtn = document.getElementById("muteButton");
