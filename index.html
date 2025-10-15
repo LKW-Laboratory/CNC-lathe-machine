@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Talking Character – CNC Lathe (v2)</title>
+  <script src="https://cdn.babylonjs.com/babylon.js"></script>
+  <script src="https://cdn.babylonjs.com/loaders/babylon.glTF2FileLoader.js"></script>
+  <style>
+    html, body { margin:0; padding:0; height:100%; background:#000; overflow:hidden; }
+    canvas { width:100%; height:100%; display:block; }
+    #audioButton, #muteButton {
+      position: absolute; top: 16px; left: 16px; z-index: 10;
+      padding: 10px 16px; border: none; border-radius: 10px;
+      background: #fff; color:#111; font-weight:600; cursor:pointer;
+      box-shadow: 0 6px 18px rgba(0,0,0,.25); margin-right: 8px;
+    }
+    #muteButton { left: 140px; }
+    #hint { position:absolute; bottom:16px; left:16px; color:#bbb; font-family:system-ui, sans-serif; font-size:12px }
+    #loading { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:#fff; font-family:system-ui; background:rgba(0,0,0,.6) }
+  </style>
+</head>
+<body>
+  <div id="loading">Loading model…</div>
+  <button id="audioButton">🔊 Play Audio</button>
+  <button id="muteButton">🔈 Mute</button>
+  <div id="hint">drag = orbit · wheel = zoom</div>
+  <canvas id="renderCanvas"></canvas>
+  <audio id="voice" src="CNC Lathe audio.mp3" preload="auto"></audio>
+
+  <script>
+    const canvas = document.getElementById("renderCanvas");
+    const engine = new BABYLON.Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true, doNotHandleContextLost: true });
+    let scene, talkGroups = [], idleGroup = null;
+
+    const centerAndFit = (mesh) => {
+      const {min, max} = mesh.getHierarchyBoundingVectors(true);
+      const center = min.add(max).scale(0.5);
+      mesh.position = mesh.position.subtract(center); // center to origin
+      const size = max.subtract(min);
+      const maxDim = Math.max(size.x, size.y, size.z);
+      const target = 2.0; // desired box size
+      if (maxDim > 0) {
+        const s = target / maxDim;
+        mesh.scaling = new BABYLON.Vector3(s, s, s);
+      }
+      return { size, center };
+    };
+
+    const orientUpAxisIfNeeded = (mesh) => {
+      // Heuristic: if Z dimension >> Y dimension, assume Z-up and rotate +X 90°
+      const {min, max} = mesh.getHierarchyBoundingVectors(true);
+      const size = max.subtract(min);
+      if (size.z > size.y * 1.5) {
+        mesh.rotate(BABYLON.Axis.X, Math.PI/2, BABYLON.Space.LOCAL);
+      }
+      // If ends up upside-down (feet above), flip 180° around Z
+      const {min: min2, max: max2} = mesh.getHierarchyBoundingVectors(true);
+      if (max2.y < 0) {
+        mesh.rotate(BABYLON.Axis.Z, Math.PI, BABYLON.Space.LOCAL);
+      }
+      // Face the camera
+      mesh.rotation.y = Math.PI;
+    };
+
+    const createScene = async () => {
+      scene = new BABYLON.Scene(engine);
+      scene.clearColor = new BABYLON.Color4(0,0,0,1);
+
+      const camera = new BABYLON.ArcRotateCamera("camera", Math.PI/2, Math.PI/2.2, 3.0, new BABYLON.Vector3(0, 1, 0), scene);
+      camera.lowerRadiusLimit = 1.2;
+      camera.upperRadiusLimit = 10.0;
+      camera.wheelPrecision = 80;
+      camera.attachControl(canvas, true);
+
+      const light = new BABYLON.HemisphericLight("hemi", new BABYLON.Vector3(0, 1, 0), scene);
+      light.intensity = 1.3;
+
+      const result = await BABYLON.SceneLoader.ImportMeshAsync("", "./", "CNC LATHE machine.glb", scene);
+      const root = result.meshes[0];
+      result.meshes.forEach(m => { if (m.rotationQuaternion) m.rotationQuaternion = null; });
+
+      orientUpAxisIfNeeded(root);
+      centerAndFit(root);
+
+      // Camera target to model center and reasonable distance
+      const bb = root.getHierarchyBoundingVectors(true);
+      const center = bb.min.add(bb.max).scale(0.5);
+      camera.setTarget(center);
+      camera.radius = 2.5;
+
+      // Animation detection
+      const nmatch = (g, words) => words.some(w => g.name.toLowerCase().includes(w));
+      const groups = scene.animationGroups || [];
+
+      idleGroup = groups.find(g => nmatch(g, ["idle", "stand", "breath", "breathe", "rest"]));
+      talkGroups = groups.filter(g => nmatch(g, ["wolf3d","viseme","lip","phoneme","talk","speak"]));
+
+      // fallback: if no dedicated talk groups, exclude idle and keep everything else for movement
+      if (talkGroups.length === 0) {
+        talkGroups = groups.filter(g => g !== idleGroup);
+      }
+
+      // Start idle looping if available
+      if (idleGroup) idleGroup.start(true, 1.0, idleGroup.from, idleGroup.to, true);
+
+      document.getElementById("loading").style.display = "none";
+      return scene;
+    };
+
+    createScene().then(() => {
+      engine.runRenderLoop(() => { if (scene) scene.render(); });
+    });
+
+    window.addEventListener("resize", () => engine.resize());
+
+    // Audio + animation logic
+    const audio = document.getElementById("voice");
+    const btn = document.getElementById("audioButton");
+    const muteBtn = document.getElementById("muteButton");
+
+    const startTalking = () => {
+      talkGroups.forEach(g => {
+        try { g.stop(); } catch(e) {}
+        g.start(false, 1.0, g.from, g.to, false);
+      });
+    };
+    const stopTalking = () => {
+      talkGroups.forEach(g => g.stop());
+      if (idleGroup) idleGroup.start(true, 1.0, idleGroup.from, idleGroup.to, true);
+    };
+
+    btn.addEventListener("click", async () => {
+      try { audio.currentTime = 0; await audio.play(); } catch(e) { console.warn(e); }
+      startTalking();
+    });
+    audio.addEventListener("ended", stopTalking);
+
+    let muted = false;
+    muteBtn.addEventListener("click", () => {
+      muted = !muted;
+      audio.muted = muted;
+      muteBtn.textContent = muted ? "🔇 Unmute" : "🔈 Mute";
+    });
+  </script>
+</body>
+</html>
