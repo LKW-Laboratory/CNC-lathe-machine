@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Talking Character – CNC Lathe (front, slight up-tilt)</title>
+  <title>Talking Character – CNC Lathe (front-lock)</title>
   <script src="https://cdn.babylonjs.com/babylon.js"></script>
   <script src="https://cdn.babylonjs.com/loaders/babylon.glTF2FileLoader.js"></script>
   <style>
@@ -35,14 +35,16 @@
     });
 
     let scene, root, idleGroup=null, talkGroups=[];
-    const CAMERA_BACKOFF = 1.95;           // push camera further back (↑ to 2.2 if you want even wider)
-    const BETA_UP_TILT   = 0.10;           // radians above eye level; 0.10 ≈ 5.7° looking slightly up
+    const CAMERA_BACKOFF = 2.0;   // ↑ for farther back view (2.2 ~ wider)
+    const BETA_UP_TILT   = 0.08;  // slight upward look
 
+    // --- helpers ---
     function stopAllAnimations(sc){
       (sc.animationGroups || []).forEach(g => { try{ g.stop(); }catch(e){} });
       sc.stopAllAnimations();
     }
 
+    // Normalize up axis (Z-up → Y-up), then we’ll choose facing
     function normalizeUpAxis(mesh){
       const bb = mesh.getHierarchyBoundingVectors(true);
       const sz = bb.max.subtract(bb.min);
@@ -51,24 +53,27 @@
       if (bb2.max.y < 0) mesh.rotate(BABYLON.Axis.Z, Math.PI, BABYLON.Space.LOCAL);
     }
 
-    function chooseFrontFacingRotation(mesh){
+    // Pick the Y-rotation that MINIMIZES depth (front view ⇒ smallest Z size)
+    function chooseTrueFront(mesh){
       const candidates = [0, Math.PI/2, Math.PI, 3*Math.PI/2];
-      let bestAngle = 0, bestScore = -Infinity;
-      for (const angle of candidates){
-        mesh.rotation.y = angle;
+      let best = 0, bestDepth = Infinity;
+      const original = mesh.rotation.y || 0;
+
+      for (const a of candidates){
+        mesh.rotation.y = a;
         const bb = mesh.getHierarchyBoundingVectors(true);
-        const width = bb.max.x - bb.min.x;
         const depth = bb.max.z - bb.min.z;
-        const score = width - depth;
-        if (score > bestScore){ bestScore = score; bestAngle = angle; }
+        if (depth < bestDepth){ bestDepth = depth; best = a; }
       }
-      mesh.rotation.y = bestAngle;
+      mesh.rotation.y = best;
+      return best; // return the chosen facing angle
     }
 
+    // Center and scale AFTER final orientation
     function centerAndScale(mesh){
       const bb = mesh.getHierarchyBoundingVectors(true);
-      const center = bb.min.add(bb.max).scale(0.5);
-      mesh.position = mesh.position.subtract(center);
+      const c  = bb.min.add(bb.max).scale(0.5);
+      mesh.position = mesh.position.subtract(c);
       const size = bb.max.subtract(bb.min);
       const maxDim = Math.max(size.x, size.y, size.z);
       if (maxDim > 0){
@@ -77,31 +82,32 @@
       }
     }
 
-    // Place camera in front and enforce a slight upward tilt (beta > π/2)
-    function placeCameraInFront(camera, mesh){
+    // Place camera directly in front of chosen facing angle
+    function placeCameraFromFacing(camera, mesh, facingAngle){
       const bb = mesh.getHierarchyBoundingVectors(true);
       const center = bb.min.add(bb.max).scale(0.5);
-      const size = bb.max.subtract(bb.min);
+      const size   = bb.max.subtract(bb.min);
       const maxDim = Math.max(size.x, size.y, size.z);
 
-      const forward = mesh.getDirection(new BABYLON.Vector3(0,0,1));   // model's front (+Z)
-      const distance = Math.max(2.2, maxDim * CAMERA_BACKOFF);
-      const camPos = center.subtract(forward.scale(distance));         // directly in front
+      // Forward vector in world from facingAngle (local +Z rotated by facingAngle)
+      const forwardLocal = new BABYLON.Vector3(0,0,1);
+      const rotMat = BABYLON.Matrix.RotationY(facingAngle);
+      const forward = BABYLON.Vector3.TransformNormal(forwardLocal, rotMat);
 
-      // Put camera roughly at chest/eye level (no top-down bias)
-      camPos.y = center.y + maxDim * 0.02;
+      const distance = Math.max(2.2, maxDim * CAMERA_BACKOFF);
+      const camPos = center.subtract(forward.scale(distance));
+      camPos.y = center.y + maxDim * 0.02; // tiny headroom
 
       camera.setTarget(center);
       camera.setPosition(camPos);
 
-      // Now force angles: alpha from forward; beta slightly above π/2 (look up a bit at the avatar)
-      const alpha = Math.atan2(-forward.x, -forward.z);
-      camera.alpha = alpha;
-      camera.beta  = Math.PI / 2 + BETA_UP_TILT;
+      // Force camera angles so we’re not top-down:
+      camera.alpha = Math.atan2(-forward.x, -forward.z);
+      camera.beta  = Math.PI/2 + BETA_UP_TILT;
 
-      // Orbit limits
-      camera.lowerBetaLimit = Math.PI/2 - 0.15;  // don't allow big top-down
-      camera.upperBetaLimit = Math.PI/2 + 0.55;  // allow some look-up
+      // Limits
+      camera.lowerBetaLimit = Math.PI/2 - 0.1;
+      camera.upperBetaLimit = Math.PI/2 + 0.6;
       camera.lowerRadiusLimit = maxDim * 0.8;
       camera.upperRadiusLimit = maxDim * 5;
     }
@@ -122,11 +128,11 @@
 
       normalizeUpAxis(root);
       stopAllAnimations(scene);
-      chooseFrontFacingRotation(root);
+      const facing = chooseTrueFront(root);
       centerAndScale(root);
-      placeCameraInFront(camera, root);
+      placeCameraFromFacing(camera, root, facing);
 
-      // Animation groups
+      // Anim groups
       const groups = scene.animationGroups || [];
       const has = (g, arr) => arr.some(w => g.name.toLowerCase().includes(w));
       idleGroup  = groups.find(g => has(g, ["idle","stand","breath","breathe","rest"]));
